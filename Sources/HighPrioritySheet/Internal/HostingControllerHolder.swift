@@ -24,7 +24,7 @@
 
 import SwiftUI
 
-@MainActor @Observable
+@Observable
 private final class SheetPresentationStore<Item: Presentable> {
     var environmentValues = EnvironmentValues()
     var item: Item?

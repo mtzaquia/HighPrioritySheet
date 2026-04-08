@@ -73,6 +73,7 @@ struct HighPrioritySheetDemoView: View {
             content: {
                 DemoHighPrioritySheetView(
                     sheet: $0,
+                    sheetBinding: $sheet,
                     highPrioritySheet: $highPrioritySheet
                 )
             }
@@ -102,6 +103,7 @@ private struct DemoSheetView: View {
 
 private struct DemoHighPrioritySheetView: View {
     let sheet: DemoSheetItem
+    @Binding var sheetBinding: DemoSheetItem?
     @Binding var highPrioritySheet: DemoSheetItem?
     @Environment(\.dismiss) private var dismiss
 
@@ -111,6 +113,8 @@ private struct DemoHighPrioritySheetView: View {
             Button("Replace high priority sheet") { highPrioritySheet = DemoSheetItem() }
             Button("Dismiss via binding") { highPrioritySheet = nil }
             Button("Dismiss via environment") { dismiss() }
+
+            Button("Dismiss sheet", role: .destructive) { sheetBinding = nil }
         }
     }
 }

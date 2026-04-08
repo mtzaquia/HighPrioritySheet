@@ -24,18 +24,19 @@
 
 import SwiftUI
 
+struct BooleanPresentationToken: Presentable {
+    static let shared = Self()
+    let id = 0
+}
+
 func shouldReplaceItems<Item: Presentable>(lhs: Item?, rhs: Item?) -> Bool {
     lhs?.id == rhs?.id
 }
 
-extension Bool: Identifiable {
-    public var id: Self { self }
-}
-
 extension Binding<Bool> {
-    func isPresent() -> Binding<Bool?> {
+    func presentationToken() -> Binding<BooleanPresentationToken?> {
         .init(
-            get: { wrappedValue ? true : nil },
+            get: { wrappedValue ? .shared : nil },
             set: { wrappedValue = $0 != nil }
         )
     }

@@ -22,7 +22,6 @@
 //  SOFTWARE.
 //
 
-import Combine
 import SwiftUI
 import UIKit
 
@@ -42,17 +41,21 @@ public extension View {
     /// - Parameters:
     ///   - isPresented: The source of truth for presentation. `true` presents
     ///     the sheet. Setting it back to `false` dismisses it.
+    ///   - onDismiss: The closure to execute when the sheet is dismissed
+    ///     without being immediately replaced by another item.
     ///   - content: A closure returning the content of the presented sheet.
     ///
     /// - Returns: A view that presents the provided content as a
     ///   high-priority sheet.
     func highPrioritySheet<Sheet: View>(
         isPresented: Binding<Bool>,
+        onDismiss: (() -> Void)? = nil,
         @ViewBuilder content: @escaping () -> Sheet
     ) -> some View {
         modifier(
             HighPrioritySheetModifier(
-                item: isPresented.isPresent(),
+                item: isPresented.presentationToken(),
+                onDismiss: onDismiss,
                 content: { _ in content() }
             )
         )
@@ -72,6 +75,8 @@ public extension View {
     /// - Parameters:
     ///   - item: The source of truth for presentation. A non-`nil` value
     ///     presents a sheet. Setting it back to `nil` dismisses it.
+    ///   - onDismiss: The closure to execute when the sheet is dismissed
+    ///     without being immediately replaced by another item.
     ///   - content: A closure returning the content of the presented sheet for
     ///     the current item.
     ///
@@ -79,14 +84,22 @@ public extension View {
     ///   sheet.
     func highPrioritySheet<Item: Presentable, Sheet: View>(
         item: Binding<Item?>,
+        onDismiss: (() -> Void)? = nil,
         content: @escaping (Item) -> Sheet
     ) -> some View {
-        modifier(HighPrioritySheetModifier(item: item, content: content))
+        modifier(
+            HighPrioritySheetModifier(
+                item: item,
+                onDismiss: onDismiss,
+                content: content
+            )
+        )
     }
 }
 
 private struct HighPrioritySheetModifier<Item: Presentable, Sheet: View>: ViewModifier {
     @Binding var item: Item?
+    let onDismiss: (() -> Void)?
     @ViewBuilder let content: (Item) -> Sheet
 
     @State private var requestStream = PresentationRequestStream<Item>()
@@ -96,12 +109,13 @@ private struct HighPrioritySheetModifier<Item: Presentable, Sheet: View>: ViewMo
             .background {
                 ControllerBridge(
                     item: $item,
-                    requestStream: requestStream,
-                    content: self.content
+                    onDismiss: onDismiss,
+                    content: self.content,
+                    requestStream: requestStream
                 )
                 .frame(width: .zero, height: .zero)
             }
-            .task(id: item?.id) {
+            .task(id: item) {
                 requestStream.send(item)
             }
     }

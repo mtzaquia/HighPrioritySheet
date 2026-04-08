@@ -22,19 +22,21 @@
 //  SOFTWARE.
 //
 
-import Combine
 import SwiftUI
 
 struct ControllerBridge<Item: Presentable, Sheet: View>: UIViewControllerRepresentable {
     @Binding var item: Item?
-    let requestStream: PresentationRequestStream<Item>
+    let onDismiss: (() -> Void)?
     @ViewBuilder let content: (Item) -> Sheet
+
+    let requestStream: PresentationRequestStream<Item>
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
-            requestStream: requestStream,
             item: $item,
-            content: content
+            onDismiss: onDismiss,
+            content: content,
+            requestStream: requestStream
         )
     }
 
@@ -52,16 +54,9 @@ struct ControllerBridge<Item: Presentable, Sheet: View>: UIViewControllerReprese
     ) {
         context.coordinator.attach(to: uiViewController)
         context.coordinator.updateItemBinding($item)
+        context.coordinator.updateOnDismiss(onDismiss)
         context.coordinator.updateContent(content, environment: context.environment)
-        context.coordinator.processCurrentRequest()
     }
-}
-
-private enum TransitionAction<Item: Presentable> {
-    case present(Item)
-    case dismiss
-    case replace(Item)
-    case none
 }
 
 extension ControllerBridge {
@@ -70,30 +65,34 @@ extension ControllerBridge {
         private weak var anchorController: UIViewController?
         private let requestStream: PresentationRequestStream<Item>
         private var itemBinding: Binding<Item?>
+        private var onDismiss: (() -> Void)?
         private var content: (Item) -> Sheet
         private var environment = EnvironmentValues()
-        private var requestState = PresentationRequestState<Item>()
         private var currentItem: Item?
         private var holderController: HostingControllerHolder<Item, Sheet>?
-        private var waitingForUIKitTransition = false
-        private var waitingForSwiftUIDismissal = false
-        private var cancellable: AnyCancellable?
+        private var requestTask: Task<Void, Error>?
+        private var sheetDismissalContinuation: CheckedContinuation<Void, Never>?
 
         init(
-            requestStream: PresentationRequestStream<Item>,
             item: Binding<Item?>,
-            content: @escaping (Item) -> Sheet
+            onDismiss: (() -> Void)?,
+            content: @escaping (Item) -> Sheet,
+            requestStream: PresentationRequestStream<Item>
         ) {
-            self.requestStream = requestStream
             self.itemBinding = item
+            self.onDismiss = onDismiss
             self.content = content
-            cancellable = requestStream.publisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] state in
+            self.requestStream = requestStream
+
+            requestTask = Task { [weak self, requestStream] in
+                for await request in requestStream.stream {
+                    try Task.checkCancellation()
+
                     guard let self else { return }
-                    requestState = state
-                    processCurrentRequest()
+                    await handle(request)
+                    requestStream.acknowledgeCurrent()
                 }
+            }
         }
 
         func attach(to controller: UIViewController) {
@@ -104,142 +103,141 @@ extension ControllerBridge {
             itemBinding = item
         }
 
+        func updateOnDismiss(_ onDismiss: (() -> Void)?) {
+            self.onDismiss = onDismiss
+        }
+
         func updateContent(_ content: @escaping (Item) -> Sheet, environment: EnvironmentValues) {
             self.content = content
             self.environment = environment
             holderController?.updateContent(content, environment: environment)
         }
 
-        func processCurrentRequest() {
-            guard !waitingForUIKitTransition, !waitingForSwiftUIDismissal else { return }
-            guard requestState.current != nil else { return }
-
-            let action = transitionAction(for: requestState.current?.item)
-            if case .present = action {
-                guard let anchorController else { return }
-                guard currentItem != nil || anchorController.viewIfLoaded?.window != nil else { return }
-            }
-
-            process(action)
-        }
-
-        private func transitionAction(for requestedItem: Item?) -> TransitionAction<Item> {
-            switch (currentItem, requestedItem) {
+        private func handle(_ request: PresentationRequest<Item>) async {
+            switch (currentItem, request.item) {
             case (.none, .none):
-                return .none
-                
+                return
+
             case let (.none, item?):
-                return .present(item)
+                await present(item)
 
             case (.some, .none):
-                return .dismiss
+                await dismissCurrentPresentation(notifyOnDismiss: true)
 
             case let (currentItem?, requestedItem?):
                 if shouldReplaceItems(lhs: currentItem, rhs: requestedItem) {
-                    return .replace(requestedItem)
+                    replaceCurrentPresentation(with: requestedItem)
+                } else {
+                    await dismissCurrentPresentation(notifyOnDismiss: false)
+                    await present(requestedItem)
                 }
-
-                return .dismiss
             }
         }
 
-        private func process(_ action: TransitionAction<Item>) {
-            switch action {
-            case let .present(item):
-                present(item)
-            case .dismiss:
-                dismissCurrentPresentation()
-            case let .replace(item):
-                replaceCurrentPresentation(with: item)
-            case .none:
-                requestStream.acknowledgeCurrent()
-            }
-        }
-
-        private func present(_ item: Item) {
-            guard let anchorController else {
+        private func present(_ item: Item) async {
+            guard let topController = await waitForPresentationController() else {
                 return
             }
 
-            let topController = anchorController.topMostViewController()
-            runAfterUIKitTransitionIfNeeded(on: topController) { [weak self, weak topController] in
-                guard let self, let topController else { return }
+            await waitForUIKitTransitionIfNeeded(on: topController)
 
-                let holder = HostingControllerHolder(
-                    item: item,
-                    environment: environment,
-                    content: content,
-                    onSheetDismiss: { [weak self] in
-                        self?.sheetDidDismiss()
-                    }
-                )
+            let holder = HostingControllerHolder(
+                item: item,
+                environment: environment,
+                content: content,
+                onSheetDismiss: { [weak self] in
+                    self?.sheetDidDismiss()
+                }
+            )
 
-                currentItem = item
-                holderController = holder
-                topController.present(holder, animated: false)
-                requestStream.acknowledgeCurrent()
+            currentItem = item
+            holderController = holder
+
+            await withCheckedContinuation { continuation in
+                topController.present(holder, animated: false) {
+                    continuation.resume()
+                }
             }
         }
 
-        private func dismissCurrentPresentation() {
+        private func dismissCurrentPresentation(notifyOnDismiss: Bool) async {
             guard let holderController else {
                 currentItem = nil
-                processCurrentRequest()
+                if notifyOnDismiss {
+                    onDismiss?()
+                }
                 return
             }
 
-            runAfterUIKitTransitionIfNeeded(on: holderController) { [weak self, weak holderController] in
-                guard let self, let holderController else { return }
-
-                waitingForSwiftUIDismissal = holderController.dismissSheet()
-                if waitingForSwiftUIDismissal == false {
-                    sheetDidDismiss()
-                }
-            }
-        }
-
-        private func replaceCurrentPresentation(with item: Item) {
-            currentItem = item
-            holderController?.replace(with: item)
-            requestStream.acknowledgeCurrent()
-        }
-
-        private func sheetDidDismiss() {
-            waitingForSwiftUIDismissal = false
+            await waitForUIKitTransitionIfNeeded(on: holderController)
+            await dismissPresentedSheetIfNeeded(from: holderController)
 
             if let currentItem,
                itemBinding.wrappedValue?.id == currentItem.id {
                 itemBinding.wrappedValue = nil
             }
 
-            guard let holderController else {
-                currentItem = nil
-                processCurrentRequest()
-                return
+            await withCheckedContinuation { continuation in
+                holderController.dismiss(animated: false) {
+                    continuation.resume()
+                }
             }
 
-            holderController.dismiss(animated: false) { [weak self] in
-                guard let self else { return }
-                self.currentItem = nil
-                self.holderController = nil
-                self.processCurrentRequest()
+            currentItem = nil
+            self.holderController = nil
+
+            if notifyOnDismiss {
+                onDismiss?()
             }
         }
 
-        private func runAfterUIKitTransitionIfNeeded(
-            on controller: UIViewController,
-            _ action: @escaping @MainActor () -> Void
-        ) {
-            guard let transitionCoordinator = controller.transitionCoordinator else {
-                action()
-                return
+        private func replaceCurrentPresentation(with item: Item) {
+            currentItem = item
+            holderController?.replace(with: item)
+        }
+
+        private func waitForPresentationController() async -> UIViewController? {
+            while Task.isCancelled == false {
+                if let anchorController {
+                    if currentItem != nil || anchorController.viewIfLoaded?.window != nil {
+                        return anchorController.topMostViewController()
+                    }
+                }
+
+                await Task.yield()
             }
 
-            waitingForUIKitTransition = true
-            transitionCoordinator.animate(alongsideTransition: nil) { [weak self] _ in
-                guard let self else { return }
-                waitingForUIKitTransition = false
-                action()
+            return nil
+        }
+
+        private func waitForUIKitTransitionIfNeeded(on controller: UIViewController) async {
+            guard let transitionCoordinator = controller.transitionCoordinator else { return }
+
+            await withCheckedContinuation { continuation in
+                transitionCoordinator.animate(alongsideTransition: nil) { _ in
+                    continuation.resume()
+                }
+            }
+        }
+
+        private func dismissPresentedSheetIfNeeded(from holderController: HostingControllerHolder<Item, Sheet>) async {
+            await withCheckedContinuation { continuation in
+                sheetDismissalContinuation = continuation
+
+                if holderController.dismissSheet() == false {
+                    sheetDismissalContinuation = nil
+                    continuation.resume()
+                }
+            }
+        }
+
+        private func sheetDidDismiss() {
+            sheetDismissalContinuation?.resume()
+            sheetDismissalContinuation = nil
+
+            if let currentItem,
+               itemBinding.wrappedValue?.id == currentItem.id {
+                itemBinding.wrappedValue = nil
             }
         }
     }

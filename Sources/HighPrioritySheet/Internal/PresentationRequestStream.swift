@@ -22,65 +22,49 @@
 //  SOFTWARE.
 //
 
-import Combine
-
 struct PresentationRequest<Item: Presentable>: Equatable {
     let item: Item?
 }
 
-struct PresentationRequestState<Item: Presentable>: Equatable {
-    var current: PresentationRequest<Item>?
-    var pending: PresentationRequest<Item>?
-}
-
-@MainActor
 final class PresentationRequestStream<Item: Presentable> {
-    private let stateSubject = CurrentValueSubject<PresentationRequestState<Item>, Never>(
-        PresentationRequestState()
-    )
+    let stream: AsyncStream<PresentationRequest<Item>>
 
-    var publisher: AnyPublisher<PresentationRequestState<Item>, Never> {
-        stateSubject
-            .removeDuplicates()
-            .eraseToAnyPublisher()
+    private var continuation: AsyncStream<PresentationRequest<Item>>.Continuation
+    private var current: PresentationRequest<Item>?
+    private var pending: PresentationRequest<Item>?
+
+    init() {
+        (self.stream, self.continuation) = AsyncStream.makeStream(of: PresentationRequest<Item>.self)
+    }
+
+    deinit {
+        continuation.finish()
     }
 
     func send(_ item: Item?) {
         let request = PresentationRequest(item: item)
-        var state = stateSubject.value
 
-        if state.current == nil {
-            state.current = request
-            update(state)
+        if current == request || pending == request {
             return
         }
 
-        if state.pending != nil {
-            state.pending = request
-            update(state)
+        if current == nil {
+            current = request
+            emitCurrentIfNeeded()
             return
         }
 
-        if shouldReplaceItems(lhs: state.current?.item, rhs: item) {
-            state.current = request
-        } else {
-            state.pending = request
-        }
-
-        update(state)
+        pending = request
     }
 
     func acknowledgeCurrent() {
-        var state = stateSubject.value
-        guard state.current != nil else { return }
-
-        state.current = state.pending
-        state.pending = nil
-        update(state)
+        current = pending
+        pending = nil
+        emitCurrentIfNeeded()
     }
 
-    private func update(_ state: PresentationRequestState<Item>) {
-        guard stateSubject.value != state else { return }
-        stateSubject.send(state)
+    private func emitCurrentIfNeeded() {
+        guard let request = current else { return }
+        _ = continuation.yield(request)
     }
 }

@@ -31,6 +31,15 @@ import UIKit
 /// current sheet content or dismiss and present a new sheet.
 public typealias Presentable = Identifiable & Hashable
 
+/// The UIKit host used to present a high-priority sheet.
+public enum HighPrioritySheetPresentationHost: Equatable, Sendable {
+    /// Presents from the current top-most view controller.
+    case topController
+
+    /// Presents from a key overlay window in the same scene.
+    case overlayWindow
+}
+
 public extension View {
     /// Presents a sheet above the current presentation stack.
     ///
@@ -41,6 +50,7 @@ public extension View {
     /// - Parameters:
     ///   - isPresented: The source of truth for presentation. `true` presents
     ///     the sheet. Setting it back to `false` dismisses it.
+    ///   - presentationHost: The UIKit host used to present the sheet.
     ///   - onDismiss: The closure to execute when the sheet is dismissed
     ///     without being immediately replaced by another item.
     ///   - content: A closure returning the content of the presented sheet.
@@ -49,12 +59,14 @@ public extension View {
     ///   high-priority sheet.
     func highPrioritySheet<Sheet: View>(
         isPresented: Binding<Bool>,
+        presentationHost: HighPrioritySheetPresentationHost = .topController,
         onDismiss: (() -> Void)? = nil,
         @ViewBuilder content: @escaping () -> Sheet
     ) -> some View {
         modifier(
             HighPrioritySheetModifier(
                 item: isPresented.presentationToken(),
+                presentationHost: presentationHost,
                 onDismiss: onDismiss,
                 content: { _ in content() }
             )
@@ -75,6 +87,7 @@ public extension View {
     /// - Parameters:
     ///   - item: The source of truth for presentation. A non-`nil` value
     ///     presents a sheet. Setting it back to `nil` dismisses it.
+    ///   - presentationHost: The UIKit host used to present the sheet.
     ///   - onDismiss: The closure to execute when the sheet is dismissed
     ///     without being immediately replaced by another item.
     ///   - content: A closure returning the content of the presented sheet for
@@ -84,12 +97,14 @@ public extension View {
     ///   sheet.
     func highPrioritySheet<Item: Presentable, Sheet: View>(
         item: Binding<Item?>,
+        presentationHost: HighPrioritySheetPresentationHost = .topController,
         onDismiss: (() -> Void)? = nil,
         content: @escaping (Item) -> Sheet
     ) -> some View {
         modifier(
             HighPrioritySheetModifier(
                 item: item,
+                presentationHost: presentationHost,
                 onDismiss: onDismiss,
                 content: content
             )
@@ -99,6 +114,7 @@ public extension View {
 
 private struct HighPrioritySheetModifier<Item: Presentable, Sheet: View>: ViewModifier {
     @Binding var item: Item?
+    let presentationHost: HighPrioritySheetPresentationHost
     let onDismiss: (() -> Void)?
     @ViewBuilder let content: (Item) -> Sheet
 
@@ -109,6 +125,7 @@ private struct HighPrioritySheetModifier<Item: Presentable, Sheet: View>: ViewMo
             .background {
                 ControllerBridge(
                     item: $item,
+                    presentationHost: presentationHost,
                     onDismiss: onDismiss,
                     content: self.content,
                     requestStream: requestStream

@@ -52,6 +52,18 @@ struct ContentView: View {
 }
 ```
 
+To host the presentation from a key overlay `UIWindow` in the same scene, pass
+`presentationHost: .overlayWindow`:
+
+```swift
+.highPrioritySheet(
+  item: $highPrioritySheet,
+  presentationHost: .overlayWindow
+) { value in
+  Text(value.uuidString)
+}
+```
+
 ## License
 
 Copyright (c) 2026 @mtzaquia

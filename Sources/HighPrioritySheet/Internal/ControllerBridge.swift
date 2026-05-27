@@ -23,9 +23,11 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct ControllerBridge<Item: Presentable, Sheet: View>: UIViewControllerRepresentable {
     @Binding var item: Item?
+    let presentationHost: HighPrioritySheetPresentationHost
     let onDismiss: (() -> Void)?
     @ViewBuilder let content: (Item) -> Sheet
 
@@ -34,6 +36,7 @@ struct ControllerBridge<Item: Presentable, Sheet: View>: UIViewControllerReprese
     func makeCoordinator() -> Coordinator {
         Coordinator(
             item: $item,
+            presentationHost: presentationHost,
             onDismiss: onDismiss,
             content: content,
             requestStream: requestStream
@@ -54,6 +57,7 @@ struct ControllerBridge<Item: Presentable, Sheet: View>: UIViewControllerReprese
     ) {
         context.coordinator.attach(to: uiViewController)
         context.coordinator.updateItemBinding($item)
+        context.coordinator.updatePresentationHost(presentationHost)
         context.coordinator.updateOnDismiss(onDismiss)
         context.coordinator.updateContent(content, environment: context.environment)
     }
@@ -65,21 +69,26 @@ extension ControllerBridge {
         private weak var anchorController: UIViewController?
         private let requestStream: PresentationRequestStream<Item>
         private var itemBinding: Binding<Item?>
+        private var presentationHost: HighPrioritySheetPresentationHost
         private var onDismiss: (() -> Void)?
         private var content: (Item) -> Sheet
         private var environment = EnvironmentValues()
         private var currentItem: Item?
         private var holderController: HostingControllerHolder<Item, Sheet>?
+        private var presentationWindow: UIWindow?
+        private weak var previousKeyWindow: UIWindow?
         private var requestTask: Task<Void, Error>?
         private var sheetDismissalContinuation: CheckedContinuation<Void, Never>?
 
         init(
             item: Binding<Item?>,
+            presentationHost: HighPrioritySheetPresentationHost,
             onDismiss: (() -> Void)?,
             content: @escaping (Item) -> Sheet,
             requestStream: PresentationRequestStream<Item>
         ) {
             self.itemBinding = item
+            self.presentationHost = presentationHost
             self.onDismiss = onDismiss
             self.content = content
             self.requestStream = requestStream
@@ -101,6 +110,10 @@ extension ControllerBridge {
 
         func updateItemBinding(_ item: Binding<Item?>) {
             itemBinding = item
+        }
+
+        func updatePresentationHost(_ presentationHost: HighPrioritySheetPresentationHost) {
+            self.presentationHost = presentationHost
         }
 
         func updateOnDismiss(_ onDismiss: (() -> Void)?) {
@@ -153,6 +166,12 @@ extension ControllerBridge {
             currentItem = item
             holderController = holder
 
+            if presentationHost == .overlayWindow,
+               let windowScene = topController.view.window?.windowScene {
+                present(holder, inNewWindowFor: windowScene)
+                return
+            }
+
             await withCheckedContinuation { continuation in
                 topController.present(holder, animated: false) {
                     continuation.resume()
@@ -177,9 +196,17 @@ extension ControllerBridge {
                 itemBinding.wrappedValue = nil
             }
 
-            await withCheckedContinuation { continuation in
-                holderController.dismiss(animated: false) {
-                    continuation.resume()
+            if presentationWindow != nil {
+                presentationWindow?.isHidden = true
+                presentationWindow?.rootViewController = nil
+                presentationWindow = nil
+                previousKeyWindow?.makeKey()
+                previousKeyWindow = nil
+            } else {
+                await withCheckedContinuation { continuation in
+                    holderController.dismiss(animated: false) {
+                        continuation.resume()
+                    }
                 }
             }
 
@@ -189,6 +216,19 @@ extension ControllerBridge {
             if notifyOnDismiss {
                 onDismiss?()
             }
+        }
+
+        private func present(
+            _ holderController: HostingControllerHolder<Item, Sheet>,
+            inNewWindowFor windowScene: UIWindowScene
+        ) {
+            let window = UIWindow(windowScene: windowScene)
+            previousKeyWindow = windowScene.windows.first { $0.isKeyWindow }
+            window.backgroundColor = .clear
+            window.windowLevel = UIWindow.Level(UIWindow.Level.normal.rawValue + 1)
+            window.rootViewController = holderController
+            window.makeKeyAndVisible()
+            presentationWindow = window
         }
 
         private func replaceCurrentPresentation(with item: Item) {

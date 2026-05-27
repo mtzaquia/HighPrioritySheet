@@ -39,6 +39,7 @@ struct SampleAppApp: App {
 struct HighPrioritySheetDemoView: View {
     @State private var sheet: DemoSheetItem?
     @State private var highPrioritySheet: DemoSheetItem?
+    @State private var presentsInNewWindow = false
 
     init() {}
 
@@ -55,6 +56,7 @@ struct HighPrioritySheetDemoView: View {
             )
 
             Button("Present sheet") { sheet = DemoSheetItem() }
+            Toggle("Present high priority sheet in new window", isOn: $presentsInNewWindow)
             Button("Present high priority sheet") { highPrioritySheet = DemoSheetItem() }
         }
         .padding()
@@ -70,6 +72,7 @@ struct HighPrioritySheetDemoView: View {
         )
         .highPrioritySheet(
             item: $highPrioritySheet,
+            presentationHost: presentsInNewWindow ? .overlayWindow : .topController,
             content: {
                 DemoHighPrioritySheetView(
                     sheet: $0,
